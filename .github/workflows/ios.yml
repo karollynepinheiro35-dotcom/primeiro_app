@@ -1,27 +1,157 @@
+# =========================================================
+# iOS Flutter CI - Kyra
+# Build sem codesign | macOS Intel | Flutter manual install
+# Arquitetura robusta, previsível e à prova de runner instável
+# =========================================================
+
 name: Build iOS (Kyra)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
+
+env:
+  FLUTTER_CHANNEL: stable
+  FLUTTER_VERSION: 3.24.5
+  BUILD_MODE: release
+  COCOAPODS_DISABLE_STATS: true
 
 jobs:
   build-ios:
     runs-on: macos-13
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
+      # -----------------------------------------------------
+      # Checkout do código
+      # -----------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Flutter manually
-        run: |
-          git clone https://github.com/flutter/flutter.git -b stable
-          echo "$PWD/flutter/bin" >> $GITHUB_PATH
-          flutter --version
+      # -----------------------------------------------------
+      # Setup Ruby (necessário para CocoaPods)
+      # -----------------------------------------------------
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: false
 
-      - name: Install dependencies
+      # -----------------------------------------------------
+      # Cache Flutter SDK
+      # -----------------------------------------------------
+      - name: Cache Flutter SDK
+        uses: actions/cache@v4
+        with:
+          path: flutter
+          key: ${{ runner.os }}-flutter-${{ env.FLUTTER_VERSION }}
+
+      # -----------------------------------------------------
+      # Instalação MANUAL do Flutter (ponto crítico resolvido)
+      # -----------------------------------------------------
+      - name: Install Flutter SDK manually
+        run: |
+          if [ ! -d "flutter" ]; then
+            git clone https://github.com/flutter/flutter.git -b $FLUTTER_CHANNEL
+          fi
+
+          cd flutter
+          git fetch
+          git checkout $FLUTTER_VERSION
+          cd ..
+
+          echo "$PWD/flutter/bin" >> $GITHUB_PATH
+          flutter doctor -v
+
+      # -----------------------------------------------------
+      # Cache Pub / Dart
+      # -----------------------------------------------------
+      - name: Cache Dart & Pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            .dart_tool
+          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.yaml') }}
+
+      # -----------------------------------------------------
+      # Dependências Flutter
+      # -----------------------------------------------------
+      - name: Install Flutter dependencies
         run: flutter pub get
 
+      # -----------------------------------------------------
+      # Cache CocoaPods
+      # -----------------------------------------------------
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ios/Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('ios/Podfile.lock') }}
+
+      # -----------------------------------------------------
+      # Instalar CocoaPods
+      # -----------------------------------------------------
+      - name: Install CocoaPods
+        run: |
+          gem install cocoapods --no-document || true
+          pod --version
+
+      # -----------------------------------------------------
+      # Instalar Pods (fallback automático Rosetta)
+      # -----------------------------------------------------
+      - name: Install iOS Pods
+        working-directory: ios
+        run: |
+          pod repo update --silent || true
+
+          if pod install --verbose; then
+            echo "Pods instalados nativamente"
+          else
+            echo "Falha nativa, tentando via Rosetta (x86_64)"
+            arch -x86_64 pod install --verbose
+          fi
+
+      # -----------------------------------------------------
+      # Build iOS sem assinatura
+      # -----------------------------------------------------
       - name: Build iOS (no codesign)
-        run: flutter build ios --no-codesign
+        run: |
+          flutter build ios \
+            --no-codesign \
+            --${BUILD_MODE}
+
+      # -----------------------------------------------------
+      # Upload de artefatos (sempre)
+      # -----------------------------------------------------
+      - name: Upload iOS build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyra-ios-build-${{ github.run_id }}
+          path: |
+            build/ios/iphoneos
+            build/ios/iphonesimulator
+            build/ios/Runner.app
+
+      # -----------------------------------------------------
+      # Resumo final
+      # -----------------------------------------------------
+      - name: Build summary
+        if: always()
+        run: |
+          echo "===================================="
+          echo " Kyra iOS CI finalizado"
+          echo " Flutter: $(flutter --version | head -n 1)"
+          echo " Modo: ${BUILD_MODE}"
+          echo " Runner: macos-13"
+          echo "===================================="
 
